@@ -2,7 +2,32 @@
 
 Notes in the Cloud is a microservice-based platform for notes, todos, reminders, notifications, and note sharing.
 
-The project is built around separate backend services, a frontend application, and an API Gateway that acts as the public entry point to the system.
+For setup and running instructions, use the infrastructure repository:
+
+```text
+https://github.com/notes-in-the-cloud/notes-cloud-infrastructure
+```
+
+That repository contains the Kubernetes manifests, database migrations setup, NodePort configuration, and the scripts for starting the whole project.
+
+---
+
+## Main Local URLs
+
+When the project is started through the infrastructure setup:
+
+```text
+Frontend: http://localhost:8080
+Gateway:  http://localhost:8090
+```
+
+The browser should communicate with the system through the API Gateway.
+
+```text
+Frontend -> API Gateway -> Internal Services
+```
+
+Internal services should not be called directly by the browser.
 
 ---
 
@@ -11,20 +36,18 @@ The project is built around separate backend services, a frontend application, a
 | Service | Purpose |
 |---|---|
 | `notes-cloud-frontend` | User interface for notes, todos, reminders, notifications, and sharing |
-| `notes-cloud-api-gateway` | Public entry point, routes requests, validates JWT, handles WebSocket connections |
-| `notes-cloud-auth-service` | Registration, login, JWT tokens, refresh tokens, user identity |
+| `notes-cloud-api-gateway` | Public entry point, routing, JWT validation, WebSocket connections |
+| `notes-cloud-auth-service` | Registration, login, JWT, refresh tokens, OAuth, user identity |
 | `notes-cloud-notes-service` | Creates, updates, deletes, and fetches notes |
 | `notes-cloud-todo-service` | Manages todo tasks and todo lists |
 | `notes-cloud-reminder-service` | Manages reminders and creates notifications |
 | `notes-cloud-sharing-service` | Creates and opens public note share links |
-| `migrator` | Runs database migrations |
-| `notes-cloud-infrastructure` | Kubernetes manifests and deployment configuration |
+| `migrator` | Runs PostgreSQL database migrations |
+| `notes-cloud-infrastructure` | Kubernetes manifests and deployment scripts |
 
 ---
 
-## System Flow
-
-The frontend should communicate only with the API Gateway.
+## Architecture
 
 ```text
 Frontend
@@ -37,22 +60,34 @@ API Gateway
    +--> Todo Service
    +--> Reminder Service
    +--> Sharing Service
+   +--> PostgreSQL
 ```
 
-The internal services should not be called directly by the browser.
+Inside Kubernetes, services communicate by service name:
+
+```text
+http://auth-service:8081
+http://notes-service:8082
+http://sharing-service:8083
+http://reminder-service:8084
+http://todo-service:8085
+http://api-gateway:8090
+```
 
 ---
 
-## Authentication Flow
+## API Gateway
+
+The gateway is exposed locally on:
 
 ```text
-1. User logs in or registers from the frontend.
-2. Frontend sends the request to the API Gateway.
-3. API Gateway forwards auth requests to Auth Service.
-4. Auth Service returns an access token and refresh token.
-5. Frontend sends the access token in future requests.
-6. API Gateway validates the JWT.
-7. API Gateway forwards the request to the correct internal service.
+http://localhost:8090
+```
+
+The frontend should use the gateway as the API entry point:
+
+```text
+http://localhost:8090/api/v1
 ```
 
 Protected requests use:
@@ -61,17 +96,35 @@ Protected requests use:
 Authorization: Bearer <access_token>
 ```
 
-After validation, the gateway can forward user context internally, for example:
+---
 
-```http
-X-User-Id: <authenticated-user-id>
+## Frontend
+
+The frontend is exposed locally on:
+
+```text
+http://localhost:8080
+```
+
+Public shared notes are opened through the frontend:
+
+```text
+http://localhost:8080/shared/{token}
+```
+
+The frontend config should point API calls and WebSocket connections to the gateway:
+
+```text
+API_BASE_URL=http://localhost:8090/api/v1
+GATEWAY_BASE_URL=http://localhost:8090
+WS_REMINDERS_URL=ws://localhost:8090/ws
 ```
 
 ---
 
-## WebSocket Notification Flow
+## WebSocket Notifications
 
-Reminder notifications should be delivered in real time through the gateway.
+Real-time reminder notifications go through the gateway.
 
 ```text
 Frontend
@@ -84,228 +137,120 @@ API Gateway
 Reminder Service
 ```
 
-Flow:
+The frontend connects to:
 
 ```text
-1. Frontend opens a WebSocket connection to the API Gateway.
-2. API Gateway validates the JWT and stores the connection by userId.
-3. Reminder Service creates a notification when a reminder is due.
-4. Reminder Service sends the notification to the API Gateway through an internal endpoint.
-5. API Gateway sends the notification to the correct frontend WebSocket connection.
+ws://localhost:8090/ws?token=<access_token>
 ```
 
-Example WebSocket endpoint:
-
-```text
-/ws/reminders?token=<access_token>
-```
-
-Example internal notification push endpoint:
-
-```text
-POST /internal/notifications/push
-```
+The reminder service sends internal notification pushes to the gateway.
 
 ---
 
-## Main API Endpoints
+## Database
 
-All requests go through the API Gateway.
+PostgreSQL is created and initialized through the infrastructure and migrator setup.
 
-Depending on deployment, the gateway may expose the auth proxy routes under:
+The migrator creates and updates the database schema through SQL migrations.
+
+Typical database connection inside Kubernetes:
 
 ```text
-/authService/api/v1
+Host: postgres
+Port: 5432
+Database: notes_cloud
+User: notes_cloud_user
 ```
 
-So the frontend can call:
+The services use environment variables such as:
 
 ```text
-http://localhost:8090/authService/api/v1
+DB_HOST=postgres
+DB_PORT=5432
+POSTGRES_DB=notes_cloud
+DB_USER=notes_cloud_user
+DB_PASSWORD=notes_cloud_password
 ```
 
 ---
 
-## Auth Endpoints
+## Health and Readiness
 
-| Method | Endpoint | Auth | Description |
-|---|---|---|---|
-| `POST` | `/register` | Public | Register user |
-| `POST` | `/login` | Public | Login user |
-| `POST` | `/logout` | Public | Logout user |
-| `POST` | `/refresh` | Public | Refresh access token |
-| `GET` | `/me` | Protected | Get current user |
-| `POST` | `/email/verify` | Public | Verify email |
-| `POST` | `/email/resend-verification` | Public | Resend verification email |
+Services expose health endpoints for Kubernetes probes.
 
-OAuth endpoints:
-
-| Method | Endpoint | Description |
-|---|---|---|
-| `GET` | `/auth/google/start` | Start Google login |
-| `GET` | `/auth/google/callback` | Google callback |
-| `GET` | `/auth/gitlab/start` | Start GitLab login |
-| `GET` | `/auth/gitlab/callback` | GitLab callback |
-
----
-
-## Notes Endpoints
-
-| Method | Endpoint | Description |
-|---|---|---|
-| `GET` | `/notes` | Get all notes |
-| `POST` | `/notes` | Create note |
-| `GET` | `/notes/{note_id}` | Get note |
-| `PUT` | `/notes/{note_id}` | Update note |
-| `DELETE` | `/notes/{note_id}` | Delete note |
-
----
-
-## Sharing Endpoints
-
-| Method | Endpoint | Auth | Description |
-|---|---|---|---|
-| `POST` | `/notes/{note_id}/share-links` | Protected | Create share link |
-| `GET` | `/share-links/{token}` | Public | Open shared note |
-
----
-
-## Todo Endpoints
-
-### Todo Tasks
-
-| Method | Endpoint | Description |
-|---|---|---|
-| `GET` | `/todos` | Get standalone tasks |
-| `POST` | `/todos` | Create task |
-| `GET` | `/todos/{todo_id}` | Get task |
-| `PUT` | `/todos/{todo_id}` | Update task / mark as done |
-| `DELETE` | `/todos/{todo_id}` | Delete task |
-
-### Todo Lists
-
-| Method | Endpoint | Description |
-|---|---|---|
-| `GET` | `/todo-lists` | Get todo lists with tasks |
-| `POST` | `/todo-lists` | Create todo list |
-| `GET` | `/todo-lists/{list_id}` | Get todo list |
-| `PUT` | `/todo-lists/{list_id}` | Update todo list |
-| `DELETE` | `/todo-lists/{list_id}` | Delete todo list |
-
-Todo behavior:
+Common custom endpoints:
 
 ```text
-The Todo page shows active tasks only.
-When a task is marked as done, it is hidden from the active task list.
-When a todo list is deleted, its tasks can become standalone tasks.
+/healthz
+/readyz
+```
+
+`/healthz` checks if the application is alive.
+
+`/readyz` checks if the service is ready, usually including a database check.
+
+Some services also expose Spring Boot Actuator endpoints:
+
+```text
+/actuator/health
+/actuator/health/liveness
+/actuator/health/readiness
 ```
 
 ---
 
-## Reminder Endpoints
+## Main Features
 
-| Method | Endpoint | Description |
-|---|---|---|
-| `GET` | `/reminders` | Get reminders |
-| `POST` | `/reminders` | Create reminder |
-| `PUT` | `/reminders` | Update reminder |
-| `GET` | `/reminders/{reminder_id}` | Get reminder |
-| `DELETE` | `/reminders/{reminder_id}` | Delete reminder |
-
-Query support:
-
-```text
-GET /reminders?status=PENDING
-GET /reminders?status=COMPLETED
-```
+- User registration and login
+- JWT authentication and refresh tokens
+- OAuth login support
+- Notes CRUD
+- Todo lists and todo tasks
+- Reminders
+- In-app notifications
+- Real-time WebSocket notifications
+- Public note sharing through secure tokens
+- PostgreSQL persistence
+- Kubernetes deployment
 
 ---
 
-## Notification Endpoints
+## Running the Project
 
-| Method | Endpoint | Description |
-|---|---|---|
-| `GET` | `/notifications` | Get notifications |
-| `DELETE` | `/notifications` | Delete all notifications |
-| `GET` | `/notifications/unread-count` | Get unread count |
-| `POST` | `/notifications/read-all` | Mark all as read |
-| `POST` | `/notifications/{notification_id}/read` | Mark one notification as read |
-
-Query support:
+Use the infrastructure repository:
 
 ```text
-GET /notifications?read=true
-GET /notifications?read=false
+https://github.com/notes-in-the-cloud/notes-cloud-infrastructure
 ```
 
----
-
-## Kubernetes Flow
-
-Inside Kubernetes, services communicate using service names:
-
-```text
-http://auth-service:8080
-http://notes-service:8082
-http://todo-service:8085
-http://reminder-service:8084
-http://sharing-service:8083
-http://api-gateway:8090
-```
-
-Do not use `localhost` for service-to-service communication inside the cluster.
-
----
-
-## Local Testing
-
-Port-forward the API Gateway:
+General flow:
 
 ```bash
-kubectl port-forward -n notes-cloud svc/api-gateway 8090:8090
+git clone https://github.com/notes-in-the-cloud/notes-cloud-infrastructure.git
+cd notes-cloud-infrastructure
+./setup.sh
 ```
 
-Frontend should call:
+After the setup finishes, open:
+
+```text
+http://localhost:8080
+```
+
+The gateway should be available at:
 
 ```text
 http://localhost:8090
 ```
 
-Example frontend config:
-
-```env
-VITE_API_BASE_URL=http://localhost:8090/authService/api/v1
-VITE_WS_GATEWAY_URL=ws://localhost:8090
-```
-
 ---
 
-## CORS
+## Notes
 
-CORS should be handled by the API Gateway.
-
-Final flow:
-
-```text
-Browser -> API Gateway -> Internal Services
-```
-
-Internal services do not need CORS because the browser does not call them directly.
-
----
-
-## Summary
-
-Notes in the Cloud uses a microservice architecture where:
-
-```text
-API Gateway = public entry point, routing, JWT validation, WebSocket management
-Auth Service = users, login, tokens
-Notes Service = note logic
-Todo Service = todo logic
-Reminder Service = reminders and notifications
-Sharing Service = public note sharing
-Frontend = user interface
-```
-
-The main goal is to keep each service focused on one responsibility while the gateway controls access to the system.
+- The frontend should call only the API Gateway.
+- Internal services communicate through Kubernetes service names.
+- Do not use `localhost` for service-to-service communication inside Kubernetes.
+- `localhost:8080` is for the frontend from the host machine.
+- `localhost:8090` is for the gateway from the host machine.
+- CORS should be handled by the API Gateway.
+- Public share links should point to the frontend, not directly to the sharing service.
